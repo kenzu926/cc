@@ -46,6 +46,7 @@ monitor.setTextScale(0.5)
 local width, height = monitor.getSize()
 local energy = 0
 local reactorRunning = false
+local stoppedForHighEnergy = false
 local message = "Controller started"
 
 local buttons = {}
@@ -133,15 +134,24 @@ end
 
 local function updateController()
     energy = matrix.getEnergyFilledPercentage()
-    reactorRunning = reactor.getStatus()
+    local actualRunning = reactor.getStatus()
+
+    -- If the state changed outside this program, do not treat it as an
+    -- automatic high-energy stop. This avoids undoing a manual/safety stop.
+    if actualRunning ~= reactorRunning then
+        stoppedForHighEnergy = false
+    end
+    reactorRunning = actualRunning
 
     if energy >= stopPercent / 100 and reactorRunning then
         reactor.scram()
         reactorRunning = false
+        stoppedForHighEnergy = true
         message = "Stopped: battery full"
     elseif energy <= startPercent / 100 and not reactorRunning then
         reactor.activate()
         reactorRunning = true
+        stoppedForHighEnergy = false
         message = "Started: battery low"
     end
 end
@@ -154,6 +164,7 @@ end
 
 local function handleTouch(x, y)
     local changed = false
+    local stopIncreased = false
 
     if isInside(buttons.startMinus, x, y) then
         startPercent = math.max(0, startPercent - 1)
@@ -165,14 +176,30 @@ local function handleTouch(x, y)
         stopPercent = math.max(startPercent + 1, stopPercent - 1)
         changed = true
     elseif isInside(buttons.stopPlus, x, y) then
-        stopPercent = math.min(100, stopPercent + 1)
-        changed = true
+        local newStopPercent = math.min(100, stopPercent + 1)
+        stopIncreased = newStopPercent > stopPercent
+        stopPercent = newStopPercent
+        changed = stopIncreased
     end
 
     if changed then
         saveThresholds()
         message = "Thresholds saved"
         updateController()
+
+        -- Raising the stop threshold above the current charge cancels only a
+        -- stop previously caused by this controller. Normal hysteresis still
+        -- applies to manual and safety shutdowns.
+        if stopIncreased
+            and stoppedForHighEnergy
+            and not reactorRunning
+            and energy < stopPercent / 100 then
+            reactor.activate()
+            reactorRunning = true
+            stoppedForHighEnergy = false
+            message = "Started: stop level raised"
+        end
+
         drawScreen()
     end
 end
